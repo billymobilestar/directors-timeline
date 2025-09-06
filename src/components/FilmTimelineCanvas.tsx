@@ -249,7 +249,7 @@ export default function FilmTimelineCanvas() {
   const [noteModalText, setNoteModalText] = useState<string>('');
 
   // image crop modal
-  const [cropModalSceneId, setCropModadlSceneId] = useState<string | null>(null);
+const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
   const [cropValues, setCropValues] = useState<ImageCrop>({ xPct: 0, yPct: 0, wPct: 100, hPct: 100 });
 
   // computed order for scenes (used by search and rendering)
