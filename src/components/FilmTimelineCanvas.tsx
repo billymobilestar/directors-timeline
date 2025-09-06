@@ -290,6 +290,23 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
   const [searchQ, setSearchQ] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
 
+  // Show/hide top chrome (minimap + toolbar)
+  const [chromeHidden, setChromeHidden] = useState(false);
+
+  // Default-hide on small screens or restore last choice
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const was = localStorage.getItem('dt:film:chromeHidden');
+      if (was === 'true' || (was === null && window.innerWidth < 768)) {
+        setChromeHidden(true);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem('dt:film:chromeHidden', chromeHidden ? 'true' : 'false'); } catch {}
+  }, [chromeHidden]);
+
   function centerOnSceneId(id: string) {
     const s = scenes.find(x => x.id === id);
     const main = canvasRef.current;
@@ -1612,7 +1629,7 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
     >
       {/* Minimap (TOP BAR — no wheel zoom/scroll) */}
       <div
-        className="h-16 border-b border-neutral-800 bg-neutral-950 flex items-center"
+        className={`border-b border-neutral-800 bg-neutral-950 flex items-center transition-[height,padding,margin,border] duration-200 ease-out ${chromeHidden ? 'h-0 overflow-hidden border-b-0' : 'h-16'}`}
         onWheel={(e) => { e.preventDefault(); e.stopPropagation(); }}
       >
         <canvas
@@ -1632,7 +1649,7 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
 
       {/* Toolbar (TOP BAR — no wheel zoom/scroll) */}
       <div
-        className="p-2 border-b border-neutral-800 flex items-center gap-3 flex-wrap"
+        className={`border-b border-neutral-800 flex items-center gap-3 flex-wrap transition-[height,padding,margin,border] duration-200 ease-out ${chromeHidden ? 'h-0 p-0 overflow-hidden border-b-0' : 'p-2'}`}
         onWheel={(e) => { e.preventDefault(); e.stopPropagation(); }}
       >
         <button className="px-3 py-1.5 rounded bg-amber-500 text-black hover:bg-amber-400" onClick={addScene}>
@@ -1838,10 +1855,19 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
         </label>
       </div>
 
+      {/* Floating UI toggle (mobile-first) */}
+      <button
+        onClick={() => setChromeHidden(v => !v)}
+        className="sm:hidden fixed right-3 top-3 z-50 px-3 py-1.5 rounded-full border border-neutral-700 bg-neutral-900/80 backdrop-blur hover:bg-neutral-800 text-sm"
+        title={chromeHidden ? 'Show controls' : 'Hide controls'}
+      >
+        {chromeHidden ? 'Show UI' : 'Hide UI'}
+      </button>
+
       {/* Search Results Panel */}
       {searchOpen && searchQ.trim() && (
         <div
-          className="border-b border-neutral-800 bg-neutral-950/95 backdrop-blur sticky top-[4rem] z-20"
+          className={`border-b border-neutral-800 bg-neutral-950/95 backdrop-blur sticky z-20 ${chromeHidden ? 'top-0' : 'top-[4rem]'}`}
           onWheel={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           <div className="max-h-60 overflow-auto p-2 space-y-1">
