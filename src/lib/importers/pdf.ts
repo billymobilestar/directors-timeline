@@ -1,54 +1,43 @@
 // src/lib/importers/pdf.ts
-// Stable client-side PDF text extraction using pdfjs-dist v3.11.174
-// This version avoids engine warnings and works well with Next.js 14.
-
-// IMPORTANT: Ensure you have installed:
-//   npm i pdfjs-dist@3.11.174
-
-const PDFJS_VERSION = '3.11.174';
-
-// Types for the small subset we use
-type PdfModule = {
-  getDocument: (src: any) => any;
-  GlobalWorkerOptions: { workerSrc: string };
-};
-
-let pdfMod: PdfModule | null = null;
+// Client-side PDF text extraction with pdfjs-dist (legacy build).
+// Kept minimal and robust for Vercel builds without Node shims.
 
 export async function extractPdfText(file: File): Promise<string> {
-  if (typeof window === 'undefined') {
-    throw new Error('PDF parsing must run in the browser.');
-  }
+  // Always use the legacy build for maximum compatibility
+  const pdfjs: any = await import('pdfjs-dist/legacy/build/pdf');
 
-  if (!pdfMod) {
-    // Use the v3 build path which is stable with older Node versions
-    const mod: any = await import('pdfjs-dist/build/pdf');
-    if (!mod?.getDocument || !mod?.GlobalWorkerOptions) {
-      throw new Error('Could not initialize pdfjs-dist build/pdf');
-    }
-    mod.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
-    pdfMod = mod as PdfModule;
-  }
+  // You can optionally set a worker; for small docs, disable the worker.
+  // pdfjs.GlobalWorkerOptions.workerSrc =
+  //   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  const { getDocument } = pdfMod!;
   const data = new Uint8Array(await file.arrayBuffer());
 
-  // Disable eval to avoid CSP/mismatch issues observed in some setups.
-  const task = getDocument({ data, isEvalSupported: false });
-  const pdf = await task.promise;
+  // Disable worker to avoid worker bundling/SSR issues in Next
+  const loadingTask = pdfjs.getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    disableFontFace: true,
+    // render not needed; we only extract text
+  });
 
-  let text = '';
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
+  const doc = await loadingTask.promise;
+  const numPages = doc.numPages;
+
+  const chunks: string[] = [];
+  for (let i = 1; i <= numPages; i++) {
+    const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    const strings = (content.items || []).map((it: any) => {
-      if (typeof it?.str === 'string') return it.str;
-      if (typeof it === 'string') return it;
-      return '';
-    });
-    text += strings.join('\n') + '\n\n';
+    // join all text runs for this page
+    const text = content.items
+      .map((it: any) => ('str' in it ? it.str : (it?.text || '')))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text) chunks.push(text);
   }
 
-  return text;
+  const full = chunks.join('\n\n').replace(/\r\n/g, '\n');
+  try { await doc.destroy?.(); } catch {}
+  return full;
 }
