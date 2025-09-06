@@ -194,6 +194,31 @@ export default function FilmTimelineCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const miniCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // --- Touch gesture state ---
+  type TouchMode = 'none' | 'pan' | 'pinch';
+  const touchModeRef = useRef<TouchMode>('none');
+  const touchStartPanRef = useRef<{ panX: number }>({ panX: 0 });
+  const touchLastRef = useRef<{ x: number; y: number } | null>(null);
+  const pinchStartRef = useRef<{ dist: number; zoom: number; centerXCss: number } | null>(null);
+
+  function touchPointInCanvas(t: React.Touch | Touch) {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+  }
+  function pinchDistance(a: React.Touch | Touch, b: React.Touch | Touch) {
+    const dx = a.clientX - b.clientX;
+    const dy = a.clientY - b.clientY;
+    return Math.hypot(dx, dy);
+  }
+  function pinchCenterCss(a: React.Touch | Touch, b: React.Touch | Touch) {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const cx = ((a.clientX + b.clientX) / 2) - rect.left;
+    const cy = ((a.clientY + b.clientY) / 2) - rect.top;
+    return { x: cx, y: cy };
+  }
+
   // viewport
   const [zoom, setZoom] = useState(120);
   const [panX, setPanX] = useState(0);
@@ -863,6 +888,39 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
   };
   const onMiniUp = () => { miniDragRef.current = { kind: 'none' }; };
   const onMiniLeave = () => { miniDragRef.current = { kind: 'none' }; };
+
+  // --- Minimap touch handlers (tap to jump, drag viewport) ---
+  const onMiniTouchStart: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (e.touches.length !== 1) return;
+    e.preventDefault();
+    const { rect, dur, w, vx0, vx1 } = miniMetrics();
+    const x = e.touches[0].clientX - rect.left;
+    if (x >= vx0 && x <= vx1) {
+      miniDragRef.current = { kind: 'viewport', offsetX: x - vx0 };
+    } else {
+      miniDragRef.current = { kind: 'background' };
+      jumpViewportCenterTo(secFromMiniX(x, dur, w));
+    }
+  };
+  const onMiniTouchMove: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (e.touches.length !== 1) return;
+    const kind = miniDragRef.current.kind;
+    if (kind === 'none') return;
+    e.preventDefault();
+    const { rect, dur, w, viewSec } = miniMetrics();
+    const x = e.touches[0].clientX - rect.left;
+    if (kind === 'viewport') {
+      const dx = miniDragRef.current.offsetX ?? 0;
+      const newVx0 = Math.max(0, Math.min(w - (viewSec / dur) * w, x - dx));
+      const newStartSec = secFromMiniX(newVx0, dur, w);
+      setPanX(-(newStartSec * zoom));
+    } else {
+      jumpViewportCenterTo(secFromMiniX(x, dur, w));
+    }
+  };
+  const onMiniTouchEnd: React.TouchEventHandler<HTMLCanvasElement> = () => {
+    miniDragRef.current = { kind: 'none' };
+  };
   function jumpViewportCenterTo(centerSec: number) {
     const main = canvasRef.current!;
     const viewSec = Math.max(0.0001, main.clientWidth / zoom);
@@ -875,6 +933,63 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
   }
 
   /* ---------- Interactions ---------- */
+
+  // --- Touch handlers (one-finger pan, two-finger pinch zoom) ---
+  const onTouchStart: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (!canvasRef.current) return;
+    if (e.touches.length === 1) {
+      e.preventDefault();
+      touchModeRef.current = 'pan';
+      touchLastRef.current = touchPointInCanvas(e.touches[0]);
+      touchStartPanRef.current = { panX };
+      // set playhead on tap start
+      const p = touchLastRef.current;
+      if (p) setPlayheadSec(Math.max(0, cssToSec(p.x)));
+    } else if (e.touches.length >= 2) {
+      e.preventDefault();
+      touchModeRef.current = 'pinch';
+      const a = e.touches[0], b = e.touches[1];
+      const dist = pinchDistance(a, b);
+      const center = pinchCenterCss(a, b);
+      pinchStartRef.current = { dist, zoom, centerXCss: center.x };
+    }
+  };
+
+  const onTouchMove: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (!canvasRef.current) return;
+    if (touchModeRef.current === 'pan' && e.touches.length === 1) {
+      e.preventDefault();
+      const cur = touchPointInCanvas(e.touches[0]);
+      const last = touchLastRef.current;
+      if (!last) { touchLastRef.current = cur; return; }
+      const dx = cur.x - last.x;
+      touchLastRef.current = cur;
+      setPanX((p) => p + dx);
+    } else if (touchModeRef.current === 'pinch' && e.touches.length >= 2) {
+      e.preventDefault();
+      const a = e.touches[0], b = e.touches[1];
+      const start = pinchStartRef.current;
+      if (!start) return;
+      const dist = pinchDistance(a, b);
+      const scale = dist / Math.max(1, start.dist);
+      const nextZoom = clampZoom(start.zoom * scale);
+      // zoom around initial pinch center
+      applyZoomAbout(start.centerXCss, nextZoom);
+    }
+  };
+
+  const onTouchEnd: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (e.touches.length === 0) {
+      touchModeRef.current = 'none';
+      touchLastRef.current = null;
+      pinchStartRef.current = null;
+    } else if (e.touches.length === 1) {
+      touchModeRef.current = 'pan';
+      touchLastRef.current = touchPointInCanvas(e.touches[0]);
+      pinchStartRef.current = null;
+    }
+  };
+
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (e.ctrlKey) {
@@ -1506,6 +1621,10 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
           onMouseMove={onMiniMove}
           onMouseUp={onMiniUp}
           onMouseLeave={onMiniLeave}
+          onTouchStart={onMiniTouchStart}
+          onTouchMove={onMiniTouchMove}
+          onTouchEnd={onMiniTouchEnd}
+          style={{ touchAction: 'none' }}
           className="w-full h-12 mx-3 mt-1 rounded-md border border-neutral-800 cursor-pointer"
           title="Overview — drag the box to pan; click background to jump"
         />
@@ -1758,6 +1877,10 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
           onMouseLeave={onMouseLeave}
           onClick={onClick}
           onDoubleClick={onDoubleClick}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+          style={{ touchAction: 'none' }}
           className="w-full h-full cursor-crosshair"
         />
 
