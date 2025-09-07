@@ -21,6 +21,32 @@ const COLLAPSED_H = 18;      // px
 const TOGGLE_SIZE = 12;      // px chevron hit area
 const TOGGLE_PAD = 4;        // padding inside note
 
+// ---- Project export format (versioned) for Music/Waveform page ----
+type AudioProjectV1 = {
+  version: 1;
+  kind: 'dtmusic';
+  projectName: string;
+  zoom: number;
+  panX: number;
+  playheadSec: number;
+  waveAmp: number;
+  notes: Note[];
+  audioMeta?: { fileName?: string; duration?: number } | null;
+};
+
+const MUSIC_AUTOSAVE_KEY = 'dt:music:autosave:v1';
+const MUSIC_PROJECT_NAME_KEY = 'dt:music:projectName';
+
+function downloadBlob(filename: string, data: Blob) {
+  const url = URL.createObjectURL(data);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuffer | null }) {
   // Main canvas & container
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -36,6 +62,31 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
   const [zoom, setZoom] = useState<number>(100); // px/sec (horizontal scale)
   const [panX, setPanX] = useState<number>(0);   // px (horizontal offset)
   const [playheadSec, setPlayheadSec] = useState<number>(0);
+
+  // Project name and top-chrome visibility (minimap + toolbar)
+  const [projectName, setProjectName] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(MUSIC_PROJECT_NAME_KEY) || 'Untitled Audio Project';
+    }
+    return 'Untitled Audio Project';
+  });
+  const [chromeHidden, setChromeHidden] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem(MUSIC_PROJECT_NAME_KEY, projectName); } catch {}
+  }, [projectName]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const was = localStorage.getItem('dt:music:chromeHidden');
+      if (was === 'true' || (was === null && window.innerWidth < 768)) {
+        setChromeHidden(true);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem('dt:music:chromeHidden', chromeHidden ? 'true' : 'false'); } catch {}
+  }, [chromeHidden]);
 
   // Waveform height control (as % of canvas height)
   const [waveAmp, setWaveAmp] = useState<number>(0.22); // 0.1–0.5 good range
@@ -75,6 +126,41 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
   // Note-dragging specifics
   const activeNoteIdRef = useRef<string | null>(null);
   const noteStartRef = useRef<{ timestampSec: number; xOffsetPx: number; yPx: number } | null>(null);
+
+  // --- Touch drag state (single-finger for note or background pan) ---
+  const touchDragRef = useRef<{
+    mode: 'none' | 'note' | 'pan';
+    id?: string; // note id when mode === 'note'
+    startX: number;
+    startY: number;
+    noteStart?: { timestampSec: number; xOffsetPx: number; yPx: number };
+    panStartX?: number;
+    panStartPanX?: number;
+  }>({ mode: 'none', startX: 0, startY: 0 });
+
+  // --- Touch gesture state ---
+  type TouchMode = 'none' | 'pan' | 'pinch';
+  const touchModeRef = useRef<TouchMode>('none');
+  const touchLastRef = useRef<{ x: number; y: number } | null>(null);
+  const pinchStartRef = useRef<{ dist: number; zoom: number; centerXCss: number } | null>(null);
+
+  function touchPointInCanvas(t: React.Touch | Touch) {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+  }
+  function pinchDistance(a: React.Touch | Touch, b: React.Touch | Touch) {
+    const dx = a.clientX - b.clientX;
+    const dy = a.clientY - b.clientY;
+    return Math.hypot(dx, dy);
+  }
+  function pinchCenterCss(a: React.Touch | Touch, b: React.Touch | Touch) {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const cx = ((a.clientX + b.clientX) / 2) - rect.left;
+    const cy = ((a.clientY + b.clientY) / 2) - rect.top;
+    return { x: cx, y: cy };
+  }
 
   // Downsample into 100ms peaks (simple starter)
   const peaks = useMemo(() => {
@@ -218,7 +304,79 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
     setModalNoteId(null);
   }
 
+  // ---- Save / Open (export/import project) ----
+  function makeProject(): AudioProjectV1 {
+    return {
+      version: 1,
+      kind: 'dtmusic',
+      projectName,
+      zoom,
+      panX,
+      playheadSec,
+      waveAmp,
+      notes,
+      audioMeta: audioBuffer ? { fileName: (audioBuffer as any)._fileName, duration: audioBuffer.duration } : null,
+    };
+  }
+
+  function exportProject() {
+    const payload = makeProject();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const safe = (projectName || 'Untitled Audio Project').replace(/[\/\\?%*:|"<>]/g, '_');
+    downloadBlob(`${safe}.dtmusic.json`, blob);
+  }
+
+  function loadProject(data: unknown) {
+    const p = data as Partial<AudioProjectV1>;
+    if (!p || p.kind !== 'dtmusic' || p.version !== 1 || !Array.isArray(p.notes)) {
+      throw new Error('Invalid music project file');
+    }
+    setNotes(p.notes);
+    setZoom(typeof p.zoom === 'number' ? p.zoom : zoom);
+    setPanX(typeof p.panX === 'number' ? p.panX : 0);
+    setPlayheadSec(typeof p.playheadSec === 'number' ? p.playheadSec : 0);
+    setWaveAmp(typeof p.waveAmp === 'number' ? p.waveAmp : waveAmp);
+    setProjectName(p.projectName || 'Untitled Audio Project');
+    // Note: audio is not embedded; user may re-upload the same file if desired.
+  }
+
+  const openProjectInputRef = useRef<HTMLInputElement | null>(null);
+  const onOpenProjectClick = () => openProjectInputRef.current?.click();
+  const onOpenProjectChosen: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+      loadProject(json);
+    } catch (err: any) {
+      console.error('[Open Music Project] Failed:', err);
+      alert(`Failed to open project: ${err?.message || String(err)}`);
+    } finally {
+      if (e.currentTarget) e.currentTarget.value = '';
+    }
+  };
+
   // ---------- Main canvas drawing ----------
+  // Autosave (debounced)
+  useEffect(() => {
+    const h = setTimeout(() => {
+      try { localStorage.setItem(MUSIC_AUTOSAVE_KEY, JSON.stringify(makeProject())); } catch {}
+    }, 400);
+    return () => clearTimeout(h);
+  }, [projectName, zoom, panX, playheadSec, waveAmp, notes]);
+
+  // Load autosave on mount (if present and nothing yet)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(MUSIC_AUTOSAVE_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data?.kind === 'dtmusic') loadProject(data);
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -350,6 +508,135 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
   }, [isPlaying, audioBuffer]);
 
   // ---------- Interactions ----------
+  // --- Touch handlers (one-finger pan/note drag, two-finger pinch zoom, tap to scrub) ---
+  const onTouchStart: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (!canvasRef.current) return;
+    if (e.touches.length === 1) {
+      e.preventDefault();
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      const x = e.touches[0].clientX - rect.left;
+      const y = e.touches[0].clientY - rect.top;
+
+      // If touching a note: start note drag (unless tapping the chevron zone -> toggle)
+      const hit = hitTestNote(x, y);
+      if (hit) {
+        if (hitToggleZone(hit, x, y)) {
+          // tap on toggle chevron: collapse/expand, no drag
+          setNotes(prev => prev.map(n => n.id === hit.id ? ({ ...n, collapsed: !n.collapsed }) : n));
+          setSelectedNoteId(hit.id);
+          touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
+          return;
+        }
+        // begin dragging this note
+        touchDragRef.current = {
+          mode: 'note',
+          id: hit.id,
+          startX: x,
+          startY: y,
+          noteStart: { timestampSec: hit.timestampSec, xOffsetPx: hit.xOffsetPx, yPx: hit.yPx },
+        };
+        setSelectedNoteId(hit.id);
+        // scrub playhead on touch-down too
+        setPlayheadSec(Math.max(0, cssToWorldTime(x)));
+        return;
+      }
+
+      // Otherwise: background pan with one finger
+      touchDragRef.current = {
+        mode: 'pan',
+        startX: x,
+        startY: y,
+        panStartX: x,
+        panStartPanX: panX,
+      };
+      touchModeRef.current = 'pan';
+      touchLastRef.current = { x, y };
+      setPlayheadSec(Math.max(0, cssToWorldTime(x)));
+    } else if (e.touches.length >= 2) {
+      e.preventDefault();
+      // pinch zoom
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
+      touchModeRef.current = 'pinch';
+      const a = e.touches[0], b = e.touches[1];
+      const dist = pinchDistance(a, b);
+      const center = pinchCenterCss(a, b);
+      pinchStartRef.current = { dist, zoom, centerXCss: center.x };
+    }
+  };
+  const onTouchMove: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (!canvasRef.current) return;
+
+    // If dragging a note, handle first
+    const drag = touchDragRef.current;
+    if (drag.mode === 'note') {
+      if (e.touches.length !== 1 || !drag.id || !drag.noteStart) return;
+      e.preventDefault();
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      const x = e.touches[0].clientX - rect.left;
+      const y = e.touches[0].clientY - rect.top;
+      const dx = x - drag.startX;
+      const dy = y - drag.startY;
+
+      // Honor the global "dragMovesTimestamp" toggle (no shift on touch)
+      setNotes(prev =>
+        prev.map(n => {
+          if (n.id !== drag.id) return n;
+          if (!dragMovesTimestamp) {
+            // timestamp stays; change xOffset + y
+            const fixedLeftPx = worldTimeToCss(drag.noteStart!.timestampSec);
+            const newOffset = (fixedLeftPx + drag.noteStart!.xOffsetPx + dx) - fixedLeftPx;
+            return { ...n, xOffsetPx: newOffset, yPx: Math.max(0, drag.noteStart!.yPx + dy) };
+          } else {
+            // timestamp changes based on new left; keep current xOffset relative
+            const newLeftPx = worldTimeToCss(drag.noteStart!.timestampSec) + drag.noteStart!.xOffsetPx + dx;
+            const newTime = cssToWorldTime(newLeftPx - n.xOffsetPx);
+            return { ...n, timestampSec: Math.max(0, newTime), yPx: Math.max(0, drag.noteStart!.yPx + dy) };
+          }
+        })
+      );
+      return;
+    }
+
+    // Otherwise fall back to pan / pinch
+    if (touchModeRef.current === 'pan' && e.touches.length === 1) {
+      e.preventDefault();
+      const cur = touchPointInCanvas(e.touches[0]);
+      const last = touchLastRef.current;
+      if (!last) { touchLastRef.current = cur; return; }
+      const dx = cur.x - last.x;
+      touchLastRef.current = cur;
+      setPanX((p) => p + dx);
+      return;
+    } else if (touchModeRef.current === 'pinch' && e.touches.length >= 2) {
+      e.preventDefault();
+      const a = e.touches[0], b = e.touches[1];
+      const start = pinchStartRef.current;
+      if (!start) return;
+      const dist = pinchDistance(a, b);
+      const scale = dist / Math.max(1, start.dist);
+      const nextZoom = Math.min(800, Math.max(20, start.zoom * scale));
+      const center = start.centerXCss;
+      const worldUnder = (center - panX) / zoom;
+      const nextPan = center - worldUnder * nextZoom;
+      setZoom(nextZoom);
+      setPanX(nextPan);
+      return;
+    }
+  };
+  const onTouchEnd: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (e.touches.length === 0) {
+      touchModeRef.current = 'none';
+      touchLastRef.current = null;
+      pinchStartRef.current = null;
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
+    } else if (e.touches.length === 1) {
+      touchModeRef.current = 'pan';
+      const cur = touchPointInCanvas(e.touches[0]);
+      touchLastRef.current = cur;
+      pinchStartRef.current = null;
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
+    }
+  };
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
 
@@ -527,6 +814,29 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
   };
 
   // ---------- Minimap (overview) ----------
+  // --- Minimap touch support ---
+  const onMiniTouchStart: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    if (!peaks || !miniCanvasRef.current) return;
+    if (e.touches.length !== 1) return;
+    e.preventDefault();
+    // behave like click: jump center to touch
+    const rect = miniCanvasRef.current.getBoundingClientRect();
+    const x = e.touches[0].clientX - rect.left;
+    const w = rect.width;
+    const targetT = Math.max(0, Math.min(peaks.duration, (x / w) * peaks.duration));
+    const main = canvasRef.current;
+    const wCss = main ? main.clientWidth : 0;
+    const viewportSec = wCss / zoom;
+    const startSec = Math.max(0, targetT - viewportSec / 2);
+    const endSec = Math.min(peaks.duration, startSec + viewportSec);
+    const clampedStart = Math.max(0, endSec - viewportSec);
+    setPanX(-(clampedStart * zoom));
+  };
+  const onMiniTouchMove: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    // treat as continuous jump while dragging
+    onMiniTouchStart(e);
+  };
+  const onMiniTouchEnd: React.TouchEventHandler<HTMLCanvasElement> = () => {};
   useEffect(() => {
     const mini = miniCanvasRef.current;
     if (!mini || !peaks) return;
@@ -593,20 +903,30 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
   return (
     <div ref={containerRef} className="h-full flex flex-col" onClick={onContainerClick}>
       {/* Minimap at TOP */}
-      <div className="h-16 border-b border-neutral-800 bg-neutral-950 flex items-center">
+      <div
+        className={`border-b border-neutral-800 bg-neutral-950 flex items-center transition-[height,padding,margin,border] duration-200 ease-out ${chromeHidden ? 'h-0 overflow-hidden border-b-0' : 'h-16'}`}
+        onWheel={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
         <canvas
           ref={miniCanvasRef}
           onMouseDown={onMiniDown}
           onMouseMove={onMiniMove}
           onMouseUp={onMiniUp}
           onMouseLeave={onMiniLeave}
+          onTouchStart={onMiniTouchStart}
+          onTouchMove={onMiniTouchMove}
+          onTouchEnd={onMiniTouchEnd}
+          style={{ touchAction: 'none' }}
           className="w-full h-12 mx-3 mt-1 rounded-md border border-neutral-800 cursor-pointer"
-          title="Overview — click or drag to navigate"
+          title="Overview — click, drag, or touch to navigate"
         />
       </div>
 
       {/* Toolbar */}
-      <div className="flex items-center gap-3 p-2 border-b border-neutral-800">
+      <div
+        className={`border-b border-neutral-800 flex items-center gap-3 flex-wrap transition-[height,padding,margin,border] duration-200 ease-out ${chromeHidden ? 'h-0 p-0 overflow-hidden border-b-0' : 'p-2'}`}
+        onWheel={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
         <button className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500" onClick={() => isPlaying ? pause() : play()}>
           {isPlaying ? 'Pause' : 'Play'}
         </button>
@@ -614,6 +934,38 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
         <button className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700" onClick={() => setPlayheadSec((s) => Math.max(0, s - 5))}>-5s</button>
         <button className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700" onClick={() => setPlayheadSec((s) => s + 5)}>+5s</button>
         <button className="px-3 py-1.5 rounded bg-amber-500 text-black hover:bg-amber-400" onClick={addNote}>Add note @ {formatTime(playheadSec)}</button>
+
+        {/* Project name */}
+        <input
+          type="text"
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          className="px-2 py-1 rounded bg-neutral-900 border border-neutral-700 w-56"
+          placeholder="Project name"
+        />
+
+        {/* Save / Open */}
+        <button
+          className="px-3 py-1.5 rounded bg-emerald-600 text-black hover:bg-emerald-500"
+          onClick={exportProject}
+          title="Save to .dtmusic.json"
+        >
+          Save Project
+        </button>
+        <input
+          ref={openProjectInputRef}
+          type="file"
+          accept=".json,.dtmusic.json"
+          className="hidden"
+          onChange={onOpenProjectChosen}
+        />
+        <button
+          className="px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700"
+          onClick={onOpenProjectClick}
+          title="Open a saved .dtmusic.json project"
+        >
+          Open Project
+        </button>
 
         {/* Waveform amplitude control */}
         <label className="ml-2 text-sm text-neutral-300 flex items-center gap-2">
@@ -660,6 +1012,15 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
         </div>
       </div>
 
+      {/* Floating UI toggle (mobile-first) */}
+      <button
+        onClick={() => setChromeHidden(v => !v)}
+        className="sm:hidden fixed right-3 top-3 z-50 px-3 py-1.5 rounded-full border border-neutral-700 bg-neutral-900/80 backdrop-blur hover:bg-neutral-800 text-sm"
+        title={chromeHidden ? 'Show controls' : 'Hide controls'}
+      >
+        {chromeHidden ? 'Show UI' : 'Hide UI'}
+      </button>
+
       {/* Main canvas */}
       <div className="flex-1 relative">
         <canvas
@@ -671,6 +1032,10 @@ export default function WaveformCanvas({ audioBuffer }: { audioBuffer: AudioBuff
           onMouseLeave={onMouseLeave}
           onClick={onClick}
           onDoubleClick={onDoubleClick}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+          style={{ touchAction: 'none' }}
           className="w-full h-full cursor-crosshair"
         />
 
