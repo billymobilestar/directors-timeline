@@ -1,7 +1,7 @@
 import { ParsedScript, SceneBlock, ScriptLine, LineType } from './scriptTypes';
 
-// Scene heading: INT., EXT., INT./EXT., EST.  (case-insensitive)
-const SCENE_RE = /^((INT|EXT|EST|INT\.\/EXT\.)\.?\s+.+?)(?:\s*[-–]\s*(DAY|NIGHT|MORNING|EVENING|DAWN|DUSK))?$/i;
+// Scene heading: INT., EXT., INT./EXT., EST., I/E  (case-insensitive), optional leading scene numbers
+const SCENE_RE = /^\s*(?:\d+[A-Z]?[.:)]?\s+)?((?:INT|EXT|EST|I\/E|INT\.\/EXT\.)\.?\s+.+?)$/i;
 // Character cue: ALL CAPS, may include spaces and some punctuation
 const CHARACTER_RE = /^[A-Z0-9 .'\-()]+$/;
 // Transition: ends with TO:, e.g., CUT TO:
@@ -50,16 +50,26 @@ function lineSeconds(type: LineType): number {
 }
 
 function normalizeSceneHeading(h: string): { heading: string; slug: string } {
-  const clean = h.replace(/\s+/g, ' ').trim();
-  // Ensure “INT.”/“EXT.” etc. have trailing dot
-  const fixed = clean.replace(/^INT(?!\.)/i, 'INT.')
-                     .replace(/^EXT(?!\.)/i, 'EXT.')
-                     .replace(/^EST(?!\.)/i, 'EST.')
-                     .replace(/^INT\.\/EXT(?!\.)/i, 'INT./EXT.');
-  // Slug as uppercase with proper separators
-  const up = fixed.toUpperCase();
+  // Collapse whitespace
+  let clean = h.replace(/\s+/g, ' ').trim();
+
+  // 1) Strip leading scene number tokens like "2", "12A.", "3)"
+  clean = clean.replace(/^\s*\d+[A-Z]?[.:)]?\s+/, '');
+
+  // 2) Strip trailing numbers separated by tabs or multiple spaces (e.g., "\t2", "   2A")
+  clean = clean.replace(/(?:\s{2,}|\t)+\d+[A-Z]?\s*$/, '');
+
+  // 3) Ensure INT./EXT./EST. tokens are normalized (I/E has no trailing dot)
+  clean = clean
+    .replace(/^INT(?!\.)/i, 'INT.')
+    .replace(/^EXT(?!\.)/i, 'EXT.')
+    .replace(/^EST(?!\.)/i, 'EST.')
+    .replace(/^INT\.\/EXT(?!\.)/i, 'INT./EXT.')
+    .replace(/^I\/E\.?\s/i, 'I/E ');
+
+  const up = clean.toUpperCase();
   const slug = up.replace(/\s*[-–]\s*/g, ' - ');
-  return { heading: fixed, slug };
+  return { heading: up, slug };
 }
 
 export function parseScript(text: string): ParsedScript {
