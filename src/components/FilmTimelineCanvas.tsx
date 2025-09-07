@@ -257,6 +257,18 @@ export default function FilmTimelineCanvas() {
   const activeImageSceneIdRef = useRef<string | null>(null);
   const imageStartSnapshotRef = useRef<{ relX: number; relY: number } | null>(null);
 
+  // --- Touch drag state (single-finger for note/image or background pan) ---
+  const touchDragRef = useRef<{
+    mode: 'none' | 'note' | 'image' | 'pan';
+    id?: string; // note id (for note) or scene id (for image)
+    startX: number;
+    startY: number;
+    noteStart?: { relX: number; relY: number };
+    imgStart?: { relX: number; relY: number };
+    panStartX?: number;
+    panStartPanX?: number;
+  }>({ mode: 'none', startX: 0, startY: 0 });
+
   // selection
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
@@ -951,19 +963,65 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
 
   /* ---------- Interactions ---------- */
 
-  // --- Touch handlers (one-finger pan, two-finger pinch zoom) ---
+  // --- Touch handlers (note/image drag or pan/pinch) ---
   const onTouchStart: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
     if (!canvasRef.current) return;
     if (e.touches.length === 1) {
       e.preventDefault();
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      const x = e.touches[0].clientX - rect.left;
+      const y = e.touches[0].clientY - rect.top;
+
+      // Try to start a NOTE drag first
+      const nHit = (typeof (hitNoteAt as any) === 'function') ? (hitNoteAt as any)(x, y) : null;
+      if (nHit) {
+        touchDragRef.current = {
+          mode: 'note',
+          id: nHit.note.id,
+          startX: x,
+          startY: y,
+          noteStart: { relX: nHit.note.relX, relY: nHit.note.relY },
+        };
+        setSelectedNoteId(nHit.note.id);
+        setSelectedImageSceneId(null);
+        setSelectedSceneId(null);
+        // also scrub playhead on tap
+        setPlayheadSec(Math.max(0, cssToSec(x)));
+        return;
+      }
+
+      // Then try IMAGE card drag
+      const iHit = (typeof (hitImageAt as any) === 'function') ? (hitImageAt as any)(x, y) : null;
+      if (iHit && iHit.scene?.id && iHit.meta) {
+        touchDragRef.current = {
+          mode: 'image',
+          id: iHit.scene.id,
+          startX: x,
+          startY: y,
+          imgStart: { relX: iHit.meta.relX, relY: iHit.meta.relY },
+        };
+        setSelectedImageSceneId(iHit.scene.id);
+        setSelectedNoteId(null);
+        setSelectedSceneId(null);
+        setPlayheadSec(Math.max(0, cssToSec(x)));
+        return;
+      }
+
+      // Otherwise background PAN
+      touchDragRef.current = {
+        mode: 'pan',
+        startX: x,
+        startY: y,
+        panStartX: x,
+        panStartPanX: panX,
+      };
       touchModeRef.current = 'pan';
-      touchLastRef.current = touchPointInCanvas(e.touches[0]);
+      touchLastRef.current = { x, y };
       touchStartPanRef.current = { panX };
-      // set playhead on tap start
-      const p = touchLastRef.current;
-      if (p) setPlayheadSec(Math.max(0, cssToSec(p.x)));
+      setPlayheadSec(Math.max(0, cssToSec(x)));
     } else if (e.touches.length >= 2) {
       e.preventDefault();
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
       touchModeRef.current = 'pinch';
       const a = e.touches[0], b = e.touches[1];
       const dist = pinchDistance(a, b);
@@ -974,6 +1032,32 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
 
   const onTouchMove: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
     if (!canvasRef.current) return;
+    // If dragging a note or image, do that first
+    const drag = touchDragRef.current;
+    if (drag.mode === 'note' || drag.mode === 'image') {
+      if (e.touches.length !== 1) return;
+      e.preventDefault();
+      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+      const x = e.touches[0].clientX - rect.left;
+      const y = e.touches[0].clientY - rect.top;
+      const dx = x - drag.startX;
+      const dy = y - drag.startY;
+
+      if (drag.mode === 'note' && drag.id && drag.noteStart) {
+        setNotes(prev => prev.map(n => n.id === drag.id ? { ...n, relX: drag.noteStart!.relX + dx, relY: drag.noteStart!.relY + dy } : n));
+        return;
+      }
+      if (drag.mode === 'image' && drag.id && drag.imgStart) {
+        setScenes(prev => prev.map(s => {
+          if (s.id !== drag.id || !s.imageMeta) return s;
+          return { ...s, imageMeta: { ...s.imageMeta, relX: drag.imgStart!.relX + dx, relY: drag.imgStart!.relY + dy } };
+        }));
+        return;
+      }
+      return;
+    }
+
+    // Otherwise, fall back to your existing pan/pinch logic
     if (touchModeRef.current === 'pan' && e.touches.length === 1) {
       e.preventDefault();
       const cur = touchPointInCanvas(e.touches[0]);
@@ -982,6 +1066,7 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
       const dx = cur.x - last.x;
       touchLastRef.current = cur;
       setPanX((p) => p + dx);
+      return;
     } else if (touchModeRef.current === 'pinch' && e.touches.length >= 2) {
       e.preventDefault();
       const a = e.touches[0], b = e.touches[1];
@@ -990,20 +1075,25 @@ const [cropModalSceneId, setCropModalSceneId] = useState<string | null>(null);
       const dist = pinchDistance(a, b);
       const scale = dist / Math.max(1, start.dist);
       const nextZoom = clampZoom(start.zoom * scale);
-      // zoom around initial pinch center
       applyZoomAbout(start.centerXCss, nextZoom);
+      return;
     }
   };
 
   const onTouchEnd: React.TouchEventHandler<HTMLCanvasElement> = (e) => {
+    // If all touches ended, clear modes
     if (e.touches.length === 0) {
       touchModeRef.current = 'none';
       touchLastRef.current = null;
       pinchStartRef.current = null;
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
     } else if (e.touches.length === 1) {
+      // back to potential pan
       touchModeRef.current = 'pan';
-      touchLastRef.current = touchPointInCanvas(e.touches[0]);
+      const cur = touchPointInCanvas(e.touches[0]);
+      touchLastRef.current = cur;
       pinchStartRef.current = null;
+      touchDragRef.current = { mode: 'none', startX: 0, startY: 0 };
     }
   };
 

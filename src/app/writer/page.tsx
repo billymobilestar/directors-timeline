@@ -1,0 +1,311 @@
+'use client';
+
+import React, { useMemo, useRef, useState } from 'react';
+
+// --------------------------------------
+// Types
+// --------------------------------------
+ type LineType = 'scene' | 'action' | 'character' | 'parenthetical' | 'dialogue' | 'transition' | 'lyric' | 'unknown';
+ type ScriptLine = { type: LineType; text: string };
+
+// --------------------------------------
+// Parsing / Formatting Heuristics
+// --------------------------------------
+const SCENE_RE = /^(INT|EXT|EST|I\/E)\.?\s/;
+const TRANSITION_RE = /(FADE (IN|OUT):|CUT TO:|MATCH CUT TO:|SMASH CUT TO:|DISSOLVE TO:|WIPE TO:|TO:)$/;
+const PAREN_RE = /^\(.+\)$/;
+const CHARACTER_RE = /^[A-Z0-9 .'\-()]+$/; // CAPS, allows (CONT'D)
+
+function isLikelyScene(s: string) {
+  return SCENE_RE.test(s);
+}
+function isLikelyTransition(s: string) {
+  return TRANSITION_RE.test(s);
+}
+function isLikelyParenthetical(s: string) {
+  return PAREN_RE.test(s);
+}
+function isLikelyCharacter(s: string) {
+  if (!CHARACTER_RE.test(s)) return false;
+  if (s.length > 30) return false; // names are short
+  if (/[.!?]$/.test(s)) return false; // not sentences
+  if (isLikelyScene(s)) return false; // avoid INT/EXT
+  return true;
+}
+
+function toLines(text: string): string[] {
+  return text.replace(/\r\n?/g, '\n').split('\n');
+}
+
+// Two-pass stateful analyzer closer to Fountain semantics
+function analyze(text: string): ScriptLine[] {
+  const raw = toLines(text);
+  const out: ScriptLine[] = [];
+  let inDialogueBlock = false; // after a character (or parenthetical under a character)
+
+  for (let i = 0; i < raw.length; i++) {
+    const original = raw[i];
+    const t = original.trim();
+
+    if (t === '') {
+      out.push({ type: 'unknown', text: '' });
+      inDialogueBlock = false;
+      continue;
+    }
+
+    // Hard classifiers first
+    if (isLikelyScene(t)) {
+      out.push({ type: 'scene', text: t.toUpperCase() });
+      inDialogueBlock = false;
+      continue;
+    }
+    if (isLikelyTransition(t.toUpperCase())) {
+      out.push({ type: 'transition', text: t.toUpperCase() });
+      inDialogueBlock = false;
+      continue;
+    }
+
+    // Character starts a dialogue block
+    if (isLikelyCharacter(t)) {
+      out.push({ type: 'character', text: t.toUpperCase() });
+      inDialogueBlock = true;
+      continue;
+    }
+
+    // Parenthetical: if inside a dialogue block, keep as parenthetical, else action
+    if (isLikelyParenthetical(t)) {
+      if (inDialogueBlock) {
+        out.push({ type: 'parenthetical', text: t });
+      } else {
+        out.push({ type: 'action', text: original });
+      }
+      continue;
+    }
+
+    // Dialogue lines continue until blank or new block
+    if (inDialogueBlock) {
+      out.push({ type: 'dialogue', text: original });
+      continue;
+    }
+
+    // Lyrics
+    if (/^~/.test(t)) {
+      out.push({ type: 'lyric', text: original.replace(/^~/, '') });
+      continue;
+    }
+
+    // Default to action
+    out.push({ type: 'action', text: original });
+  }
+
+  return out;
+}
+
+// --------------------------------------
+// Render helpers — mimic screenplay page layout
+// --------------------------------------
+function LineView({ line }: { line: ScriptLine }) {
+  // Page width ~ 8.5in with ~1in margins → content ~6.5in ≈ 624px
+  // Use Courier-like monospaced face (classic screenplay look)
+  const base = 'whitespace-pre-wrap';
+
+  switch (line.type) {
+    case 'scene':
+      return (
+        <div className={`${base} font-bold tracking-wide text-[13px] text-neutral-100`} style={{ marginLeft: 0 }}>
+          {line.text.trim()}
+        </div>
+      );
+
+    case 'transition':
+      return (
+        <div className={`${base} text-[13px] text-neutral-200`} style={{ textAlign: 'right' }}>
+          {line.text.trim()}
+        </div>
+      );
+
+    case 'character':
+      return (
+        <div className={`${base} text-[13px] font-bold text-neutral-200`} style={{ textAlign: 'center', marginTop: 16, marginBottom: 4 }}>
+          {line.text.trim()}
+        </div>
+      );
+
+    case 'parenthetical':
+      return (
+        <div className={`${base} italic text-[13px] text-neutral-300`} style={{ textAlign: 'center', maxWidth: 360, margin: '0 auto 4px' }}>
+          {line.text.trim()}
+        </div>
+      );
+
+    case 'dialogue':
+      return (
+        <div className={`${base} text-[13px] leading-6 text-neutral-100`} style={{ maxWidth: 360, margin: '0 auto' }}>
+          {line.text}
+        </div>
+      );
+
+    case 'lyric':
+      return (
+        <div className={`${base} text-[13px] leading-6 text-cyan-300`} style={{ maxWidth: 360, margin: '0 auto' }}>
+          {line.text}
+        </div>
+      );
+
+    case 'action':
+    default:
+      return (
+        <div className={`${base} text-[13px] leading-6 text-neutral-200`} style={{ marginLeft: 0 }}>
+          {line.text}
+        </div>
+      );
+  }
+}
+
+// --------------------------------------
+// Page Component
+// --------------------------------------
+export default function WriterPage() {
+  const [text, setText] = useState<string>(
+    'INT. STUDIO - NIGHT\n\nThe band sets up. A neon sign flickers.\n\nJESSICA\nLet\'s roll from the top.\n\n(whispers)\nOkay...\n\nCUT TO:'
+  );
+  const [liveFormat, setLiveFormat] = useState(true);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Tag current line helpers — transforms the selected line's text conveniently
+  function tagCurrentLine(as: LineType) {
+    const ta = taRef.current; if (!ta) return;
+    const value = text.replace(/\r\n?/g, '\n');
+    const start = ta.selectionStart ?? 0;
+    const before = value.lastIndexOf('\n', Math.max(0, start - 1));
+    const after = value.indexOf('\n', start);
+    const lineStart = before === -1 ? 0 : before + 1;
+    const lineEnd = after === -1 ? value.length : after;
+    const line = value.slice(lineStart, lineEnd);
+
+    let replaced = line;
+    switch (as) {
+      case 'scene':
+        replaced = line.toUpperCase();
+        if (!SCENE_RE.test(replaced)) replaced = 'INT. ' + replaced;
+        break;
+      case 'character':
+        replaced = line.toUpperCase();
+        break;
+      case 'parenthetical':
+        replaced = line.trim();
+        if (!PAREN_RE.test(replaced)) replaced = `(${replaced})`;
+        break;
+      case 'transition':
+        replaced = line.replace(/\s+$/, '').toUpperCase();
+        if (!/ TO:$/.test(replaced)) replaced = replaced + ' TO:';
+        break;
+      case 'dialogue':
+      case 'action':
+      case 'lyric':
+      default:
+        // no-op; preview will classify based on context
+        break;
+    }
+
+    const next = value.slice(0, lineStart) + replaced + value.slice(lineEnd);
+    setText(next);
+    const pos = lineStart + replaced.length;
+    requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = pos; ta.focus(); });
+  }
+
+  const lines = useMemo(
+    () => (liveFormat ? analyze(text) : toLines(text).map(t => ({ type: 'action' as LineType, text: t }))),
+    [text, liveFormat]
+  );
+
+  function exportFountain() {
+    try {
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'script.fountain';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Failed to export .fountain');
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-neutral-950 text-neutral-100">
+      {/* Header */}
+      <header className="border-b border-neutral-800 bg-neutral-900/60 backdrop-blur">
+        <div className="mx-auto max-w-6xl px-4 py-3 flex items-center gap-3">
+          <a href="/" className="text-sm text-neutral-400 hover:text-neutral-200">← Welcome</a>
+          <div className="ml-auto flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-neutral-400">
+              <input type="checkbox" className="accent-blue-500" checked={liveFormat} onChange={(e) => setLiveFormat(e.target.checked)} />
+              Live format
+            </label>
+            <button
+              onClick={exportFountain}
+              className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-sm font-medium"
+              title="Download current draft as .fountain"
+            >
+              Export .fountain
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Toolbar */}
+      <div className="mx-auto max-w-6xl px-4 pt-4">
+        <div className="flex flex-wrap gap-2 text-sm">
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('scene')}>Scene</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('character')}>Character</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('parenthetical')}>Parenthetical</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('dialogue')}>Dialogue</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('action')}>Action</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('transition')}>Transition</button>
+          <button className="px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 border border-neutral-700" onClick={() => tagCurrentLine('lyric')}>Lyric</button>
+        </div>
+      </div>
+
+      {/* Editor + Preview */}
+      <section className="mx-auto max-w-6xl px-4 py-6 grid gap-6 md:grid-cols-2">
+        <div>
+          <label className="block text-sm text-neutral-400 mb-2">Draft</label>
+          <textarea
+            ref={taRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="w-full h-[70vh] rounded-xl bg-neutral-900 border border-neutral-800 p-3 text-[13px] leading-6"
+            style={{ fontFamily: 'Courier New, Courier, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+            placeholder="Write your script here in Fountain style..."
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm text-neutral-400 mb-2">Formatted Preview</label>
+          <div className="w-full h-[70vh] overflow-auto rounded-xl bg-neutral-900 border border-neutral-800 p-6">
+            <div
+              className="mx-auto"
+              style={{ width: 624, fontFamily: 'Courier New, Courier, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+            >
+              {lines.map((ln, i) => (
+                <LineView key={i} line={ln} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-neutral-800">
+        <div className="mx-auto max-w-6xl px-4 py-4 text-xs text-neutral-500">
+          Tips: Use CAPS for scene headings & character names. Parentheticals in (parentheses). Transitions end with TO:
+        </div>
+      </footer>
+    </main>
+  );
+}
