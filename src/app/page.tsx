@@ -52,7 +52,10 @@ export default function WelcomePage() {
   ];
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100">
+    <main
+      className="h-[100svh] md:h-screen bg-neutral-950 text-neutral-100 overflow-y-auto overscroll-y-contain overflow-x-hidden touch-pan-y"
+      style={{ WebkitOverflowScrolling: 'touch' }}
+    >
       {/* Header */}
       <header className="border-b border-neutral-800 bg-neutral-900/60 backdrop-blur">
         <div className="mx-auto max-w-6xl px-4 py-6 flex items-center gap-4">
