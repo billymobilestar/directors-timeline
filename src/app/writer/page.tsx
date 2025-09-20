@@ -371,7 +371,12 @@ export default function WriterPage() {
 
       let y = top;
       const paras = text.replace(/\r\n?/g, '\n').split('\n');
-      const split = doc.splitTextToSize(paras, contentW) as string[];
+      const split: string[] = [];
+      for (const p of paras) {
+        const lines = doc.splitTextToSize(p, contentW) as unknown as string[];
+        if (Array.isArray(lines)) split.push(...lines);
+        else if (typeof lines === 'string') split.push(lines);
+      }
       for (const line of split) {
         if (y + leading > pageH - bottom) {
           doc.addPage('letter', 'portrait');
