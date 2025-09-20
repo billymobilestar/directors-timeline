@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ScriptLine, LineType } from '@/lib/scriptTypes';
 import { linesToFountain } from '@/lib/fountainFormat';
 import { parseScript } from '@/lib/scriptParser';
@@ -60,6 +60,19 @@ function textToScriptLines(text: string): ScriptLine[] {
 }
 
 export default function ScriptEditorPage() {
+  // Warn if film autosave is missing so user doesn’t lose timeline work
+  const [showAutosaveWarn, setShowAutosaveWarn] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const key = 'dt:film:autosave';
+      const v = window.localStorage.getItem(key);
+      if (!v) setShowAutosaveWarn(true);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
   const [lines, setLines] = useState<ScriptLine[]>([
     { type: 'scene', text: 'INT. APARTMENT - NIGHT' },
     { type: 'action', text: 'A small room. A laptop hums on a desk.' },
@@ -146,6 +159,16 @@ export default function ScriptEditorPage() {
 
   return (
     <div className="h-full w-full flex flex-col">
+      {showAutosaveWarn && (
+        <div className="px-3 py-2 bg-amber-900/40 text-amber-200 text-sm border-b border-amber-700/50 flex items-center gap-3">
+          <span>⚠️ Film autosave not found (<code className="px-1 bg-black/30 rounded">dt:film:autosave</code>). Open your Film timeline and save a backup to avoid data loss.</span>
+          <button
+            className="ml-auto px-2 py-1 rounded bg-amber-800/60 hover:bg-amber-700/70"
+            onClick={() => setShowAutosaveWarn(false)}
+            aria-label="Dismiss warning"
+          >Dismiss</button>
+        </div>
+      )}
       <div className="border-b border-neutral-800 p-2 flex items-center gap-2">
         <span className="text-sm text-neutral-400">Script Editor</span>
 

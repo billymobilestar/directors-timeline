@@ -1317,8 +1317,7 @@ const onMouseUp = () => endDrag();
       <input
   id="ai-audio-input"
   type="file"
-  accept="audio/*"
-  className="hidden"
+accept="audio/*,video/*,application/octet-stream,.mp3,.wav,.m4a,.aac,.ogg,.flac,.aif,.aiff,.caf"  className="hidden"
   onChange={async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;

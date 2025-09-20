@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
+// PDF export uses dynamic import('jspdf') in the handlers below
 
 // --------------------------------------
 // Types
@@ -183,6 +184,27 @@ export default function WriterPage() {
   const [liveFormat, setLiveFormat] = useState(true);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // Notify if film autosave key is missing to avoid data loss
+  const [missingAutosave, setMissingAutosave] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const HAS = !!localStorage.getItem('dt:film:autosave');
+      setMissingAutosave(!HAS);
+      // Try a system notification once (non-blocking). Falls back to banner below.
+      if (!HAS && 'Notification' in window) {
+        const notify = () => new Notification('Missing film autosave', { body: 'dt:film:autosave not found. Save your film timeline to avoid data loss.' });
+        if (Notification.permission === 'granted') {
+          notify();
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(p => p === 'granted' && notify());
+        }
+      }
+    } catch {
+      // ignore storage errors (e.g., Safari private mode)
+    }
+  }, []);
+
   // Tag current line helpers — transforms the selected line's text conveniently
   function tagCurrentLine(as: LineType) {
     const ta = taRef.current; if (!ta) return;
@@ -232,6 +254,138 @@ export default function WriterPage() {
     () => (liveFormat ? analyze(text) : toLines(text).map(t => ({ type: 'action' as LineType, text: t }))),
     [text, liveFormat]
   );
+
+  async function exportPdfFormatted() {
+    try {
+      const { jsPDF } = await import('jspdf');
+      // Letter size in points (1pt = 1/72in): 8.5 x 11 in => 612 x 792 pt
+      const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+
+      // Margins similar to screenplay (1.0" left, 1.0" right, ~1.0" top/bottom)
+      const pageW = 612, pageH = 792;
+      const left = 72, right = 72, top = 72, bottom = 72;
+      const contentW = pageW - left - right;
+
+      // Use Courier family
+      const baseFont = 'courier';
+      const baseSize = 12; // ~ standard screenplay font size
+      const leading = 18; // line height in pt
+
+      let x = left;
+      let y = top;
+
+      const writeLine = (txt: string, opts?: { align?: 'left' | 'center' | 'right'; bold?: boolean; italic?: boolean }) => {
+        const align = opts?.align || 'left';
+        const style = opts?.bold ? (opts?.italic ? 'bolditalic' : 'bold') : (opts?.italic ? 'italic' : 'normal');
+        doc.setFont(baseFont, style as any);
+        doc.setFontSize(baseSize);
+        // simple wrap: split by content width using jsPDF splitTextToSize
+        const wrapped = doc.splitTextToSize(txt, contentW);
+        for (const w of wrapped) {
+          if (y + leading > pageH - bottom) {
+            doc.addPage('letter', 'portrait');
+            x = left; y = top;
+          }
+          if (align === 'center') {
+            const width = doc.getTextWidth(w);
+            doc.text(w, left + (contentW - width) / 2, y);
+          } else if (align === 'right') {
+            const width = doc.getTextWidth(w);
+            doc.text(w, left + contentW - width, y);
+          } else {
+            doc.text(w, x, y);
+          }
+          y += leading;
+        }
+      };
+
+      // Render analyzed lines with simple screenplay-like formatting
+      for (const ln of lines) {
+        switch (ln.type) {
+          case 'scene':
+            y += 6; // extra space before scene
+            writeLine(ln.text.trim(), { bold: true });
+            y += 6;
+            break;
+          case 'transition':
+            writeLine(ln.text.trim(), { align: 'right' });
+            break;
+          case 'character':
+            y += 6;
+            writeLine(ln.text.trim(), { align: 'center', bold: true });
+            break;
+          case 'parenthetical':
+            writeLine(ln.text.trim(), { align: 'center', italic: true });
+            break;
+          case 'dialogue':
+            // center column narrower (about 3 inches)
+            {
+              const oldContentW = contentW;
+              const dialogW = 324; // 4.5in
+              const dialogLeft = left + (contentW - dialogW) / 2;
+              const txt = ln.text;
+              const wrapped = (new jsPDF({ unit: 'pt', format: 'letter' })).splitTextToSize(txt, dialogW);
+              // Use existing doc with our helper:
+              doc.setFont(baseFont, 'normal');
+              doc.setFontSize(baseSize);
+              for (const w of wrapped) {
+                if (y + leading > pageH - bottom) {
+                  doc.addPage('letter', 'portrait');
+                  x = left; y = top;
+                }
+                doc.text(w, dialogLeft, y);
+                y += leading;
+              }
+            }
+            break;
+          case 'lyric':
+            writeLine(ln.text, { align: 'center' });
+            break;
+          case 'action':
+          default:
+            writeLine(ln.text);
+            break;
+        }
+      }
+
+      doc.save('script.pdf');
+    } catch (err) {
+      console.error('Export PDF (formatted) failed:', err);
+      alert('Failed to export formatted PDF');
+    }
+  }
+
+  async function exportPdfFountain() {
+    try {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+      const pageW = 612, pageH = 792;
+      const left = 72, right = 72, top = 72, bottom = 72;
+      const contentW = pageW - left - right;
+      const baseFont = 'courier';
+      const baseSize = 12;
+      const leading = 18;
+
+      doc.setFont(baseFont, 'normal');
+      doc.setFontSize(baseSize);
+
+      let y = top;
+      const paras = text.replace(/\r\n?/g, '\n').split('\n');
+      const split = doc.splitTextToSize(paras, contentW) as string[];
+      for (const line of split) {
+        if (y + leading > pageH - bottom) {
+          doc.addPage('letter', 'portrait');
+          y = top;
+        }
+        doc.text(line, left, y);
+        y += leading;
+      }
+      doc.save('script_fountain.pdf');
+    } catch (err) {
+      console.error('Export PDF (fountain) failed:', err);
+      alert('Failed to export PDF from fountain text');
+    }
+  }
 
   function exportFountain() {
     try {
@@ -290,9 +444,40 @@ export default function WriterPage() {
             >
               Export .fountain
             </button>
+            <button
+              onClick={exportPdfFormatted}
+              className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-sm font-medium"
+              title="Export formatted preview to PDF"
+            >
+              Export PDF (formatted)
+            </button>
+            <button
+              onClick={exportPdfFountain}
+              className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-sm font-medium"
+              title="Export raw Fountain text to PDF"
+            >
+              Export PDF (from Fountain)
+            </button>
           </div>
         </div>
       </header>
+
+      {missingAutosave && (
+        <div className="mx-auto max-w-6xl px-4 pt-3">
+          <div className="flex items-start gap-3 rounded-lg border border-amber-700 bg-amber-900/40 text-amber-100 px-3 py-2 text-sm">
+            <div className="mt-0.5">⚠️</div>
+            <div className="flex-1">
+              <div className="font-medium">Missing film autosave</div>
+              <div className="opacity-90">We couldn’t find <code className="font-mono">dt:film:autosave</code> in your browser. Open your Film timeline and save to avoid data loss.</div>
+            </div>
+            <button
+              onClick={() => setMissingAutosave(false)}
+              className="shrink-0 rounded-md px-2 py-1 text-amber-200 hover:bg-amber-800/60"
+              title="Dismiss"
+            >Dismiss</button>
+          </div>
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="mx-auto max-w-6xl px-4 pt-4">
